@@ -1,0 +1,116 @@
+void database::proceed_bets()
+{ try {
+   auto head_time = head_block_time();
+
+   auto& flipcoin_idx = get_index_type<flipcoin_index>().indices().get<by_expiration>();
+   while( !flipcoin_idx.empty() && flipcoin_idx.begin()->expiration <= head_time && flipcoin_idx.begin()->status < 2 )
+   {
+      auto block_id = head_block_id();
+      const flipcoin_object& flipcoin = *flipcoin_idx.begin();
+      uint8_t check_nonce = 8+flipcoin.nonce;
+      if (check_nonce>39) {
+         check_nonce = 39;
+      }
+      std::string id_substr = std::string(block_id).substr(check_nonce,1);
+      if(flipcoin.status == 0) {
+         flipcoin_log( "proceed_bets: CANCEL FLIPCOIN: ${b}", ("b", flipcoin.id) );
+         adjust_balance( flipcoin.bettor, flipcoin.bet );
+         flipcoin_cancel_operation vop_cancel;
+         vop_cancel.flipcoin = flipcoin.id;
+         vop_cancel.bettor = flipcoin.bettor;
+         vop_cancel.bet = flipcoin.bet;
+         push_applied_operation( vop_cancel );
+
+         remove(flipcoin);
+      }
+      if (flipcoin.status == 1) {
+         flipcoin_log( "proceed_bets: FLIP FLIPCOIN: ${b}", ("b", flipcoin.id) );
+         flipcoin_log( "proceed_bets: block ID: ${b}", ("b", block_id) );
+         flipcoin_log( "proceed_bets: block NUM: ${b}", ("b", head_block_num()) );
+         flipcoin_log( "proceed_bets: block TIME: ${b}", ("b", head_time) );
+         flipcoin_log( "proceed_bets: ID SUBSTRING: ${b}", ("b", id_substr) );
+         bool heads;
+         switch(id_substr[0])
+               {
+                     case '0': heads = true; break;
+                     case '1': heads = false; break;
+                     case '2': heads = true; break;
+                     case '3': heads = false; break;
+                     case '4': heads = true; break;
+                     case '5': heads = false; break;
+                     case '6': heads = true; break;
+                     case '7': heads = false; break;
+                     case '8': heads = true; break;
+                     case '9': heads = false; break;
+                     case 'a': heads = true; break;
+                     case 'b': heads = false; break;
+                     case 'c': heads = true; break;
+                     case 'd': heads = false; break;
+                     case 'e': heads = true; break;
+                     case 'f': heads = false; break;
+               }
+         flipcoin_log( "proceed_bets: HEADS: ${b}", ("b", heads) );
+         flipcoin_log( "proceed_bets: flipcoin: ${b}", ("b", flipcoin ) );
+         asset prize;
+         prize.asset_id = flipcoin.bet.asset_id;
+         prize.amount = count_prize(flipcoin.bet.amount);
+         asset referral_prize;
+         referral_prize.asset_id = flipcoin.bet.asset_id;
+         referral_prize.amount = count_referral_prize(flipcoin.bet.amount);
+
+         flipcoin_win_operation vop_win;
+         flipcoin_loose_operation vop_loose;
+
+         vop_win.flipcoin = flipcoin.id;
+         vop_win.payout = prize;
+         vop_win.referral_payout = referral_prize;
+
+         vop_loose.flipcoin = flipcoin.id;
+         vop_loose.bet = flipcoin.bet;
+         
+         const account_object& caller = get(*flipcoin.caller);
+
+         if(heads == true) {
+            flipcoin_log( "proceed_bets: Winner: ${b}", ("b", flipcoin.bettor ) );
+            vop_win.winner = flipcoin.bettor;     
+            vop_loose.looser =  caller.id;
+            adjust_balance( flipcoin.bettor, prize );
+         }
+         else {
+            flipcoin_log( "proceed_bets: Winner: ${b}", ("b", flipcoin.caller ) );
+            vop_win.winner = caller.id;
+            vop_loose.looser = flipcoin.bettor;
+            adjust_balance( caller.id, prize );
+         }
+         push_applied_operation( vop_win );
+         push_applied_operation( vop_loose );
+
+         const account_object& winner_account = get(vop_win.winner);
+         const account_object& looser_account = get(vop_loose.looser);
+winner_account.statistics(*this).update_nv(referral_prize.amount, uint8_t(1) , uint8_t(0) , winner_account, *this);
+         const account_statistics_object& customer_statistics = winner_account.statistics(*this);
+
+         if ( head_block_time() >= HARDFORK_CWD2_TIME ) {
+            winner_account.statistics(*this).update_pv(flipcoin.bet.amount, winner_account, *this);
+            looser_account.statistics(*this).update_pv(flipcoin.bet.amount, looser_account, *this);
+         }
+         else {
+            winner_account.statistics(*this).update_pv(referral_prize.amount, winner_account, *this);
+         }
+
+         modify(customer_statistics, [&](account_statistics_object& s)
+         {
+            s.pay_fee( referral_prize.amount, false );
+         });
+         //--------
+         // if (head_time < HARDFORK_CWD6_TIME) {
+            modify(winner_account, [&](account_object& a) {
+               a.statistics(*this).process_fees(a, *this);
+            });
+         // }
+         // -----------------------
+
+         remove(flipcoin);
+      }
+   }
+} FC_CAPTURE_AND_RETHROW() }
